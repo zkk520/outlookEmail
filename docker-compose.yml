@@ -1,6 +1,6 @@
 services:
   outlookemail:
-    image: ghcr.io/assast/outlookemail:latest
+    image: ghcr.io/zkk520/outlookemail:latest
     restart: unless-stopped
     ports:
       - "5000:5000"

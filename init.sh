@@ -52,7 +52,7 @@ log_ok ".env 已写入"
 cat > "$DEPLOY_DIR/docker-compose.yml" << EOF
 services:
   outlookemail:
-    image: ghcr.io/assast/outlookemail:latest
+    image: ghcr.io/zkk520/outlookemail:latest
     restart: unless-stopped
     ports:
       - "5000:5000"
