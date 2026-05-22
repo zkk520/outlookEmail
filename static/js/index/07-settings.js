@@ -468,7 +468,6 @@
             if (!btn || btn.disabled) return;
 
             const draft = buildWebdavBackupDraftConfig();
-            const loginPassword = document.getElementById('webdavBackupVerifyPassword')?.value || '';
 
             if (!draft.url) {
                 showToast('请先填写 WebDAV 目录 URL', 'error');
@@ -484,10 +483,7 @@
                 showToast('WebDAV 目录 URL 无效', 'error');
                 return;
             }
-            if (!loginPassword) {
-                showToast('手动上传备份需要输入登录密码', 'error');
-                return;
-            }
+            if (!(await showConfirmModal('确定要立即上传备份到 WebDAV 吗？', { title: '手动上传备份', confirmText: '确认上传', danger: false }))) return;
 
             const originalText = btn.textContent;
             btn.disabled = true;
@@ -504,7 +500,6 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         config: draft,
-                        login_password: loginPassword
                     })
                 });
                 const data = await response.json();
@@ -537,6 +532,155 @@
                 btn.disabled = false;
                 btn.textContent = originalText;
             }
+        }
+
+        function renderWebdavPullStatus(settings) {
+            const statusEl = document.getElementById('webdavPullStatus');
+            if (!statusEl) return;
+            const lines = [];
+            if (settings.webdav_pull_next_run) {
+                lines.push(`下次执行：${formatAbsoluteDateTime(settings.webdav_pull_next_run)}（${settings.app_timezone || getAppTimeZone()}）`);
+            }
+            if (settings.webdav_pull_last_run_at) {
+                const statusText = settings.webdav_pull_last_status === 'success' ? '成功' : (settings.webdav_pull_last_status || '未知');
+                lines.push(`上次执行：${formatAbsoluteDateTime(settings.webdav_pull_last_run_at)}，状态：${statusText}`);
+            }
+            if (settings.webdav_pull_last_filename) {
+                lines.push(`最近文件：${settings.webdav_pull_last_filename}`);
+            }
+            if (settings.webdav_pull_last_added_count) {
+                lines.push(`最近新增：${settings.webdav_pull_last_added_count} 个账号`);
+            }
+            if (settings.webdav_pull_last_message) {
+                lines.push(settings.webdav_pull_last_message);
+            }
+            statusEl.style.display = lines.length ? 'block' : 'none';
+            statusEl.textContent = lines.join('\n');
+        }
+
+        async function selectWebdavPullCronExample(cronExpr) {
+            const input = document.getElementById('webdavPullCron');
+            if (input) input.value = cronExpr;
+            await validateWebdavPullCronExpression();
+        }
+
+        async function validateWebdavPullCronExpression() {
+            const cronExpr = document.getElementById('webdavPullCron')?.value.trim() || '';
+            const resultEl = document.getElementById('webdavPullCronValidationResult');
+            if (!resultEl) return;
+            if (!cronExpr) { resultEl.style.display = 'none'; return; }
+            try {
+                const response = await fetch('/api/settings/validate-cron', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cron_expression: cronExpr, expected_fields: 5 }),
+                });
+                const data = await response.json();
+                resultEl.style.display = 'block';
+                if (data.success && data.future_runs?.length) {
+                    resultEl.style.color = '#28a745';
+                    resultEl.textContent = `下次执行：${data.future_runs.map(r => formatAbsoluteDateTime(r)).join('，')}`;
+                } else {
+                    resultEl.style.color = '#dc3545';
+                    resultEl.textContent = data.error || 'Cron 表达式无效';
+                }
+            } catch {
+                resultEl.style.display = 'none';
+            }
+        }
+
+        async function pullWebdavBackupNow(filename) {
+            const btn = document.getElementById('pullWebdavBackupBtn');
+            const resultEl = document.getElementById('webdavPullStatus');
+            const originalText = btn?.textContent || '立即拉取';
+            if (btn) { btn.disabled = true; btn.textContent = '拉取中...'; }
+            try {
+                const response = await fetch('/api/settings/pull-webdav-backup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename: filename || null }),
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showToast(data.message || 'WebDAV 拉取完成', 'success');
+                    if (resultEl) {
+                        resultEl.style.display = 'block';
+                        resultEl.style.color = '#28a745';
+                        resultEl.textContent = `✓ ${data.message}`;
+                    }
+                    hideWebdavFileSelectModal();
+                    await loadSettings();
+                } else {
+                    const message = data.error?.message || data.error || 'WebDAV 拉取失败';
+                    handleApiError(data, '拉取失败');
+                    if (resultEl) {
+                        resultEl.style.display = 'block';
+                        resultEl.style.color = '#dc3545';
+                        resultEl.textContent = `✗ ${message}`;
+                    }
+                }
+            } catch (error) {
+                showToast('WebDAV 拉取失败', 'error');
+                if (resultEl) {
+                    resultEl.style.display = 'block';
+                    resultEl.style.color = '#dc3545';
+                    resultEl.textContent = `✗ 拉取失败: ${error.message}`;
+                }
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = originalText; }
+            }
+        }
+
+        let _webdavFileSelectResolve = null;
+
+        function hideWebdavFileSelectModal() {
+            const modal = document.getElementById('webdavFileSelectModal');
+            if (modal) modal.style.display = 'none';
+            if (_webdavFileSelectResolve) { _webdavFileSelectResolve(null); _webdavFileSelectResolve = null; }
+        }
+
+        function resolveWebdavFileSelect() {
+            const selected = document.querySelector('#webdavFileSelectList input[name="webdavFile"]:checked');
+            const filename = selected?.value || null;
+            const modal = document.getElementById('webdavFileSelectModal');
+            if (modal) modal.style.display = 'none';
+            if (_webdavFileSelectResolve) { _webdavFileSelectResolve(filename); _webdavFileSelectResolve = null; }
+        }
+
+        async function selectAndPullWebdavBackup() {
+            let files;
+            try {
+                const resp = await fetch('/api/settings/list-webdav-backup');
+                const data = await resp.json();
+                if (!data.success) {
+                    showToast(data.error || '获取备份文件列表失败', 'error');
+                    return;
+                }
+                files = data.files || [];
+            } catch (e) {
+                showToast('获取备份文件列表失败', 'error');
+                return;
+            }
+
+            if (files.length === 0) {
+                showToast('WebDAV 目录中没有找到备份文件', 'error');
+                return;
+            }
+
+            const listEl = document.getElementById('webdavFileSelectList');
+            listEl.innerHTML = files.map((f, i) => `
+                <label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;cursor:pointer;background:${i===0?'var(--bg-hover, #f5f5f5)':''};">
+                    <input type="radio" name="webdavFile" value="${f.name}" ${i === 0 ? 'checked' : ''}>
+                    <span style="font-size:13px;word-break:break-all;">${f.name}</span>
+                </label>
+            `).join('');
+
+            const modal = document.getElementById('webdavFileSelectModal');
+            modal.style.display = 'flex';
+
+            const filename = await new Promise(resolve => { _webdavFileSelectResolve = resolve; });
+            if (!filename) return;
+            await pullWebdavBackupNow(filename);
         }
 
         function ensureEditForwardToggle() {
@@ -884,9 +1028,11 @@
                     document.getElementById('webdavBackupUsername').value = data.settings.webdav_backup_username || '';
                     document.getElementById('webdavBackupPassword').value = data.settings.webdav_backup_password || '';
                     document.getElementById('webdavBackupCron').value = data.settings.webdav_backup_cron || '0 3 * * *';
-                    document.getElementById('webdavBackupVerifyPassword').value = '';
                     lastLoadedWebdavBackupSettings = normalizeWebdavBackupSettings(data.settings);
                     renderWebdavBackupStatus(data.settings);
+                    document.getElementById('webdavPullEnabled').checked = String(data.settings.webdav_pull_enabled) === 'true';
+                    document.getElementById('webdavPullCron').value = data.settings.webdav_pull_cron || '0 4 * * *';
+                    renderWebdavPullStatus(data.settings);
                     setSelectedForwardChannels(data.settings.forward_channels || []);
 
                     const useCron = data.settings.use_cron_schedule === 'true';
@@ -947,7 +1093,6 @@
             const wecomWebhookUrl = document.getElementById('settingsWecomWebhookUrl').value.trim();
             const webdavBackupSettings = getWebdavBackupFormSettings();
             const webdavBackupChanged = hasWebdavBackupSettingsChanged(webdavBackupSettings);
-            const webdavBackupVerifyPassword = document.getElementById('webdavBackupVerifyPassword')?.value || '';
 
             if (Number.isNaN(days) || days < 1 || days > 90) {
                 showToast('刷新周期必须在 1-90 天之间', 'error');
@@ -1002,10 +1147,7 @@
                 return;
             }
             if (webdavBackupChanged) {
-                if (!webdavBackupVerifyPassword) {
-                    showToast('修改 WebDAV 备份设置需要输入登录密码', 'error');
-                    return;
-                }
+                if (!(await showConfirmModal('确定要保存 WebDAV 备份设置变更吗？', { title: '保存 WebDAV 设置', confirmText: '确认保存', danger: false }))) return;
                 if (webdavBackupSettings.webdav_backup_enabled === 'true' && !webdavBackupSettings.webdav_backup_url) {
                     showToast('启用 WebDAV 备份时必须填写 WebDAV 目录 URL', 'error');
                     return;
@@ -1057,8 +1199,10 @@
 
             if (webdavBackupChanged) {
                 Object.assign(settings, webdavBackupSettings);
-                settings.webdav_backup_verify_password = webdavBackupVerifyPassword;
             }
+
+            settings.webdav_pull_enabled = document.getElementById('webdavPullEnabled')?.checked || false;
+            settings.webdav_pull_cron = document.getElementById('webdavPullCron')?.value.trim() || '0 4 * * *';
 
             if (strategy === 'cron') {
                 if (!refreshCron) {

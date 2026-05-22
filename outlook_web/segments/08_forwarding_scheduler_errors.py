@@ -982,12 +982,6 @@ def upload_webdav_backup_with_config(base_url: str, username: str, password: str
 @login_required
 def api_upload_webdav_backup():
     data = request.json or {}
-    login_password = str(data.get('login_password') or '')
-    if not login_password:
-        return jsonify({'success': False, 'error': '手动上传备份需要输入登录密码'})
-    if not verify_login_password(login_password):
-        return jsonify({'success': False, 'error': '登录密码错误'})
-
     config = normalize_webdav_backup_config(data.get('config', {}) if isinstance(data.get('config'), dict) else {})
     if not config['url']:
         config = {
@@ -1081,6 +1075,327 @@ def add_webdav_backup_job(scheduler, cron_trigger_cls, app_tzinfo) -> bool:
     return True
 
 
+def record_webdav_pull_result(status: str, message: str, filename: str = '', added_count: int = 0) -> None:
+    now_text = datetime.now(get_app_timezone_info()).isoformat()
+    set_setting('webdav_pull_last_run_at', now_text)
+    set_setting('webdav_pull_last_status', status)
+    set_setting('webdav_pull_last_message', message)
+    if filename:
+        set_setting('webdav_pull_last_filename', filename)
+    set_setting('webdav_pull_last_added_count', str(added_count))
+
+
+def _parse_backup_account_line(line: str):
+    parts = [p.strip() for p in line.split('----')]
+    if len(parts) >= 4:
+        try:
+            int(parts[3])
+            # 第 4 段是数字，是 custom IMAP 的端口，走自动识别
+            return parse_account_import(line, 'client_id_refresh_token', 'auto')
+        except ValueError:
+            pass
+    # 尝试 Outlook 格式（需要 client_id + refresh_token 均非空）
+    parsed = parse_account_import(line, 'client_id_refresh_token', 'outlook')
+    if parsed:
+        return parsed
+    # 回退自动识别（gmail/yahoo 等 IMAP）
+    return parse_account_import(line, 'client_id_refresh_token', 'auto')
+
+
+def _parse_webdav_backup_content(content: str):
+    """将备份文件内容解析为分组列表。"""
+    groups = []
+    current_group = None
+    current_temp_section = None
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith('[') and line.endswith(']'):
+            section = line[1:-1].lower()
+            if current_group and current_group['is_temp']:
+                current_temp_section = section
+            continue
+
+        if '----' not in line:
+            if current_group and current_group['is_temp'] and current_temp_section == 'gptmail':
+                current_group['temp_emails'].setdefault('gptmail', []).append(line)
+            else:
+                is_temp = (line == '临时邮箱')
+                current_group = {
+                    'group_name': line,
+                    'is_temp': is_temp,
+                    'account_lines': [],
+                    'temp_emails': {},
+                }
+                current_temp_section = None
+                groups.append(current_group)
+        else:
+            if current_group is None:
+                continue
+            if current_group['is_temp']:
+                if current_temp_section in ('duckmail', 'cloudflare'):
+                    current_group['temp_emails'].setdefault(current_temp_section, []).append(line)
+            else:
+                current_group['account_lines'].append(line)
+
+    return groups
+
+
+def _import_webdav_backup_groups(parsed_groups) -> Dict[str, Any]:
+    """将解析后的分组数据追加导入本地（已存在的账号跳过）。"""
+    total_added = 0
+    total_skipped = 0
+
+    for group_data in parsed_groups:
+        group_name = group_data['group_name']
+
+        if group_data['is_temp']:
+            temp_emails = group_data['temp_emails']
+            for email_addr in temp_emails.get('gptmail', []):
+                if add_temp_email(email_addr, provider='gptmail'):
+                    total_added += 1
+                else:
+                    total_skipped += 1
+            for entry in temp_emails.get('duckmail', []):
+                parts = entry.split('----', 1)
+                email_addr = parts[0].strip()
+                pw = parts[1].strip() if len(parts) > 1 else ''
+                if add_temp_email(email_addr, provider='duckmail', duckmail_password=pw or None):
+                    total_added += 1
+                else:
+                    total_skipped += 1
+            for entry in temp_emails.get('cloudflare', []):
+                parts = entry.split('----', 1)
+                email_addr = parts[0].strip()
+                jwt = parts[1].strip() if len(parts) > 1 else ''
+                if add_temp_email(email_addr, provider='cloudflare', cloudflare_jwt=jwt or None):
+                    total_added += 1
+                else:
+                    total_skipped += 1
+            continue
+
+        groups = load_groups()
+        group = next((g for g in groups if g['name'] == group_name), None)
+        if group:
+            group_id = group['id']
+        else:
+            group_id = add_group(group_name)
+
+        if not group_id:
+            continue
+
+        parsed_accounts = []
+        for line in group_data['account_lines']:
+            parsed = _parse_backup_account_line(line)
+            if parsed:
+                parsed_accounts.append(parsed)
+
+        if parsed_accounts:
+            result = add_accounts_bulk(parsed_accounts, group_id)
+            total_added += result.get('added_count', 0)
+            total_skipped += result.get('skipped_count', 0)
+
+    return {'total_added': total_added, 'total_skipped': total_skipped}
+
+
+def _list_webdav_backup_files(base_url: str, username: str, password: str):
+    """PROPFIND 列出目录中的备份文件，返回 (filename, full_url) 列表，按文件名降序（最新优先）。"""
+    import xml.etree.ElementTree as ET
+    from urllib.parse import urljoin, urlparse, unquote
+
+    auth = (username, password) if username or password else None
+    response = requests.request(
+        'PROPFIND',
+        base_url.rstrip('/') + '/',
+        headers={'Depth': '1', 'Content-Type': 'application/xml'},
+        auth=auth,
+        timeout=HTTP_REQUEST_TIMEOUT,
+    )
+    if response.status_code not in (207, 200):
+        raise ValueError(f'PROPFIND 失败：HTTP {response.status_code}')
+
+    root = ET.fromstring(response.content)
+    dav_ns = {'D': 'DAV:'}
+    base_path = urlparse(base_url).path.rstrip('/')
+
+    results = []
+    for resp_el in root.findall('.//D:response', dav_ns):
+        href_el = resp_el.find('D:href', dav_ns)
+        if href_el is None or not href_el.text:
+            continue
+        href = href_el.text.strip()
+        filename = unquote(href.rstrip('/').split('/')[-1])
+        if not filename.endswith('.txt'):
+            continue
+        if urlparse(href).path.rstrip('/') == base_path:
+            continue
+        parsed_href = urlparse(href)
+        if parsed_href.scheme and parsed_href.netloc:
+            full_url = href
+        else:
+            full_url = urljoin(base_url.rstrip('/') + '/', filename)
+        results.append((filename, full_url))
+
+    results.sort(key=lambda x: x[0], reverse=True)
+    return results
+
+
+def run_webdav_pull(filename: Optional[str] = None) -> Dict[str, Any]:
+    if not webdav_pull_run_lock.acquire(blocking=False):
+        return {'success': False, 'error': 'WebDAV 拉取正在执行中'}
+
+    try:
+        base_url = get_setting('webdav_backup_url', '').strip()
+        username = get_setting('webdav_backup_username', '').strip()
+        password = get_setting_decrypted('webdav_backup_password', '')
+
+        if not base_url:
+            message = 'WebDAV 目录 URL 为空，请先配置备份设置'
+            record_webdav_pull_result('failed', message)
+            return {'success': False, 'error': message}
+
+        from urllib.parse import urlparse as _urlparse
+        parsed = _urlparse(base_url)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            message = 'WebDAV 目录 URL 必须是有效的 http(s) 地址'
+            record_webdav_pull_result('failed', message)
+            return {'success': False, 'error': message}
+
+        auth = (username, password) if username or password else None
+        file_list = _list_webdav_backup_files(base_url, username, password)
+        if not file_list:
+            message = 'WebDAV 目录中没有找到 .txt 备份文件'
+            record_webdav_pull_result('failed', message)
+            return {'success': False, 'error': message}
+
+        if filename:
+            matched = [(fn, url) for fn, url in file_list if fn == filename]
+            if not matched:
+                message = f'未找到指定的备份文件：{filename}'
+                record_webdav_pull_result('failed', message)
+                return {'success': False, 'error': message}
+            filename, download_url = matched[0]
+        else:
+            filename, download_url = file_list[0]
+        dl_response = requests.get(
+            download_url,
+            auth=auth,
+            timeout=HTTP_REQUEST_TIMEOUT,
+        )
+        if dl_response.status_code != 200:
+            message = f'下载备份文件失败：HTTP {dl_response.status_code}'
+            record_webdav_pull_result('failed', message, filename)
+            return {'success': False, 'error': message}
+
+        content = dl_response.content.decode('utf-8', errors='replace')
+        parsed_groups = _parse_webdav_backup_content(content)
+        if not parsed_groups:
+            message = f'备份文件 {filename} 内容为空或无法解析'
+            record_webdav_pull_result('failed', message, filename)
+            return {'success': False, 'error': message}
+
+        result = _import_webdav_backup_groups(parsed_groups)
+        added = result['total_added']
+        skipped = result['total_skipped']
+        message = f'拉取成功：{filename}，新增 {added} 个账号，跳过 {skipped} 个已存在'
+        record_webdav_pull_result('success', message, filename, added)
+        log_audit('pull', 'webdav', None, message)
+        return {
+            'success': True,
+            'message': message,
+            'filename': filename,
+            'added_count': added,
+            'skipped_count': skipped,
+        }
+    except Exception as exc:
+        message = f'WebDAV 拉取失败：{str(exc)}'
+        record_webdav_pull_result('failed', message)
+        return {'success': False, 'error': message}
+    finally:
+        webdav_pull_run_lock.release()
+
+
+@app.route('/api/settings/list-webdav-backup', methods=['GET'])
+@login_required
+def api_list_webdav_backup():
+    base_url = get_setting('webdav_backup_url', '').strip()
+    username = get_setting('webdav_backup_username', '').strip()
+    password = get_setting_decrypted('webdav_backup_password', '')
+    if not base_url:
+        return jsonify({'success': False, 'error': 'WebDAV 目录 URL 为空，请先配置备份设置'})
+    try:
+        file_list = _list_webdav_backup_files(base_url, username, password)
+        return jsonify({'success': True, 'files': [{'name': fn} for fn, _ in file_list]})
+    except Exception as exc:
+        return jsonify({'success': False, 'error': f'获取备份文件列表失败：{str(exc)}'})
+
+
+@app.route('/api/settings/pull-webdav-backup', methods=['POST'])
+@login_required
+def api_pull_webdav_backup():
+    data = request.json or {}
+    filename = str(data.get('filename') or '').strip() or None
+    result = run_webdav_pull(filename=filename)
+    if result.get('success'):
+        return jsonify({
+            'success': True,
+            'message': result.get('message') or 'WebDAV 拉取完成',
+            'filename': result.get('filename', ''),
+            'added_count': result.get('added_count', 0),
+            'skipped_count': result.get('skipped_count', 0),
+        })
+    return jsonify({'success': False, 'error': result.get('error', 'WebDAV 拉取失败')})
+
+
+def scheduled_webdav_pull_task():
+    try:
+        with app.app_context():
+            result = run_webdav_pull()
+            if result.get('success'):
+                safe_console_print(f"[WebDAV 拉取] {result.get('message', '完成')}")
+            else:
+                safe_console_print(f"[WebDAV 拉取] 跳过或失败：{result.get('error', '未知错误')}")
+    except Exception as exc:
+        safe_console_print(f"[WebDAV 拉取] 执行失败：{str(exc)}")
+
+
+def add_webdav_pull_job(scheduler, cron_trigger_cls, app_tzinfo) -> bool:
+    if get_setting('webdav_pull_enabled', 'false').lower() != 'true':
+        return False
+
+    cron_expr = get_setting('webdav_pull_cron', '0 4 * * *').strip()
+    cron_error = validate_five_field_cron_expression_for_timezone(cron_expr, get_app_timezone())
+    if cron_error:
+        safe_console_print(f"⚠ WebDAV 拉取 Cron 表达式无效：{cron_error}")
+        return False
+
+    parts = cron_expr.split()
+    if len(parts) != 5:
+        safe_console_print("⚠ WebDAV 拉取仅支持 5 段 Cron，未启动拉取任务")
+        return False
+
+    minute, hour, day, month, day_of_week = parts
+    scheduler.add_job(
+        func=scheduled_webdav_pull_task,
+        trigger=cron_trigger_cls(
+            minute=minute,
+            hour=hour,
+            day=day,
+            month=month,
+            day_of_week=day_of_week,
+            timezone=app_tzinfo,
+        ),
+        id='webdav_pull',
+        name='WebDAV 定时拉取',
+        replace_existing=True,
+    )
+    safe_console_print(f"✓ WebDAV 拉取任务已启动：Cron 表达式 '{cron_expr}'")
+    return True
+
+
 def build_forwarding_poll_trigger(cron_trigger_cls, interval_minutes: int, timezone):
     """构建转发轮询触发器，兼容 60 分钟整点轮询。"""
     normalized_interval = max(1, min(60, int(interval_minutes or 5)))
@@ -1171,6 +1486,7 @@ def init_scheduler():
                     safe_console_print("✓ 定时刷新已禁用")
 
                 jobs_added = add_webdav_backup_job(scheduler, CronTrigger, app_tzinfo) or jobs_added
+                jobs_added = add_webdav_pull_job(scheduler, CronTrigger, app_tzinfo) or jobs_added
 
                 if not jobs_added:
                     return None
@@ -1503,7 +1819,15 @@ assert_endpoint_protection('api_external_get_emails', '_requires_api_key', 'api_
 def bad_request(error):
     """处理400错误"""
     safe_console_print(f"400 Bad Request: {error}")
-    return jsonify({'success': False, 'error': '请求格式错误'}), 400
+    # 保留 CSRF 错误描述，使前端重试机制可识别
+    try:
+        from flask_wtf.csrf import CSRFError
+        if isinstance(error, CSRFError):
+            return jsonify({'success': False, 'error': error.description, 'csrf_error': True}), 400
+    except ImportError:
+        pass
+    description = getattr(error, 'description', None) or '请求格式错误'
+    return jsonify({'success': False, 'error': description}), 400
 
 
 @app.errorhandler(Exception)

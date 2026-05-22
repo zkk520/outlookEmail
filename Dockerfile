@@ -1,7 +1,6 @@
 # 使用 Python 3.11 作为基础镜像
 FROM python:3.11-slim
 
-# 设置工作目录
 WORKDIR /app
 
 # 安装 curl（用于健康检查）
@@ -9,21 +8,22 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
+# 从官方镜像复制 uv 二进制（不引入额外依赖）
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
+    UV_NO_CACHE=1 \
     GUNICORN_TIMEOUT=300 \
     GUNICORN_THREADS=4 \
     IMAP_TIMEOUT=45
 
-# 复制依赖文件
-COPY requirements.txt .
+# 复制服务端依赖文件（不含 Windows 专用的 pystray / Pillow）
+COPY requirements-server.txt .
 
-# 安装依赖（包括生产服务器）
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt && \
-    pip install gunicorn
+# 用 uv 安装依赖到系统 Python（容器内无需虚拟环境）
+RUN uv pip install --system -r requirements-server.txt gunicorn
 
 # 复制应用代码
 COPY . .

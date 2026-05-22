@@ -297,6 +297,24 @@ def api_get_settings():
             )['next_run']
         except Exception:
             settings['webdav_backup_next_run'] = ''
+    settings['webdav_pull_enabled'] = get_setting('webdav_pull_enabled', 'false')
+    settings['webdav_pull_cron'] = get_setting('webdav_pull_cron', '0 4 * * *')
+    settings['webdav_pull_last_run_at'] = get_setting('webdav_pull_last_run_at', '')
+    settings['webdav_pull_last_status'] = get_setting('webdav_pull_last_status', '')
+    settings['webdav_pull_last_message'] = get_setting('webdav_pull_last_message', '')
+    settings['webdav_pull_last_filename'] = get_setting('webdav_pull_last_filename', '')
+    settings['webdav_pull_last_added_count'] = get_setting('webdav_pull_last_added_count', '')
+    settings['webdav_pull_next_run'] = ''
+    pull_cron_error = validate_five_field_cron_expression_for_timezone(settings['webdav_pull_cron'], settings['app_timezone'])
+    if not pull_cron_error:
+        try:
+            settings['webdav_pull_next_run'] = build_cron_preview(
+                settings['webdav_pull_cron'],
+                settings['app_timezone'],
+                count=1,
+            )['next_run']
+        except Exception:
+            settings['webdav_pull_next_run'] = ''
     return jsonify({'success': True, 'settings': settings})
 
 
@@ -310,12 +328,6 @@ def api_update_settings():
 
     webdav_backup_changed = has_webdav_backup_setting_changes(data)
     if webdav_backup_changed:
-        confirm_password = str(data.get('webdav_backup_verify_password', ''))
-        if not confirm_password:
-            return jsonify({'success': False, 'error': '修改 WebDAV 备份设置需要验证登录密码'})
-        if not verify_login_password(confirm_password):
-            return jsonify({'success': False, 'error': 'WebDAV 备份设置验证失败：登录密码错误'})
-
         proposed_backup = {
             key: normalize_webdav_backup_setting_value(key, get_current_webdav_backup_setting_value(key))
             for key in WEBDAV_BACKUP_SETTING_KEYS
@@ -689,6 +701,24 @@ def api_update_settings():
             updated.append('WebDAV 备份 Cron')
         else:
             errors.append('保存 WebDAV 备份 Cron 失败')
+
+    if 'webdav_pull_enabled' in data:
+        enabled = normalize_bool_setting_value(data['webdav_pull_enabled'])
+        if set_setting('webdav_pull_enabled', enabled):
+            updated.append('WebDAV 拉取开关')
+        else:
+            errors.append('保存 WebDAV 拉取开关失败')
+
+    if 'webdav_pull_cron' in data:
+        cron_expr = str(data['webdav_pull_cron']).strip()
+        pull_timezone = normalize_app_timezone_name(str(data.get('app_timezone') or get_app_timezone()).strip(), get_app_timezone())
+        cron_error = validate_five_field_cron_expression_for_timezone(cron_expr, pull_timezone)
+        if cron_error:
+            errors.append(cron_error)
+        elif set_setting('webdav_pull_cron', cron_expr):
+            updated.append('WebDAV 拉取 Cron')
+        else:
+            errors.append('保存 WebDAV 拉取 Cron 失败')
 
     if errors:
         return jsonify({'success': False, 'error': '；'.join(errors)})

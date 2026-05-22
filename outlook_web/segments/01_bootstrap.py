@@ -81,6 +81,7 @@ scheduler_instance = None
 scheduler_lock = threading.Lock()
 token_refresh_run_lock = threading.Lock()
 webdav_backup_run_lock = threading.Lock()
+webdav_pull_run_lock = threading.Lock()
 proxy_socket_lock = threading.RLock()
 
 

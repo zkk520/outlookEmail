@@ -43,3 +43,23 @@ docker-compose.yml
 # 文档
 README.md
 *.md
+
+# 敏感配置（使用 volume 或 env_file 注入）
+.env
+.env.*
+
+# 数据目录（使用 volume 挂载）
+data/
+
+# 仅 Windows 本地使用的文件
+requirements.txt
+init.sh
+start.ps1
+*.spec
+*.exe
+
+# CI/CD 和测试
+.github/
+tests/
+docs/
+img/
