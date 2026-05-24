@@ -134,6 +134,18 @@ try:
 except Exception:
     APP_VERSION = '1.0.0'
 
+try:
+    with resource_path('BUILD_COMMIT').open('r', encoding='utf-8') as _f:
+        APP_BUILD_COMMIT = _f.read().strip()[:8] or 'unknown'
+except Exception:
+    APP_BUILD_COMMIT = 'unknown'
+
+try:
+    with resource_path('UPSTREAM_BASE_VERSION').open('r', encoding='utf-8') as _f:
+        APP_UPSTREAM_BASE_VERSION = _f.read().strip() or ''
+except Exception:
+    APP_UPSTREAM_BASE_VERSION = ''
+
 REPOSITORY_OWNER = os.getenv('REPOSITORY_OWNER', 'assast')
 REPOSITORY_NAME = os.getenv('REPOSITORY_NAME', 'outlookEmail')
 CHANGELOG_URL = os.getenv(
@@ -288,6 +300,8 @@ def build_version_status_payload() -> Dict[str, Any]:
         'changelog_url': CHANGELOG_URL,
         'checked_at': datetime.now(timezone.utc).isoformat(),
         'errors': snapshot['errors'],
+        'build_commit': APP_BUILD_COMMIT,
+        'upstream_base_version': APP_UPSTREAM_BASE_VERSION,
     }
 
     if current_parts is None:

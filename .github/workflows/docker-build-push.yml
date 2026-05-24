@@ -78,6 +78,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            BUILD_COMMIT=${{ github.sha }}
 
       - name: Image digest
         run: echo ${{ steps.meta.outputs.digest }}
@@ -93,7 +95,7 @@ jobs:
           script: |
             cd ${{ secrets.DEPLOY_PATH }}
             docker compose pull
-            docker compose up -d
+            docker compose up -d --force-recreate
             docker image prune -f
 
   build-from-release:
@@ -139,6 +141,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            BUILD_COMMIT=${{ github.sha }}
 
       - name: Image digest
         run: echo ${{ steps.meta.outputs.digest }}
@@ -154,5 +158,5 @@ jobs:
           script: |
             cd ${{ secrets.DEPLOY_PATH }}
             docker compose pull
-            docker compose up -d
+            docker compose up -d --force-recreate
             docker image prune -f

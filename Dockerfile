@@ -28,6 +28,10 @@ RUN uv pip install --system -r requirements-server.txt gunicorn
 # 复制应用代码
 COPY . .
 
+# 注入构建提交哈希（CI 传入，本地构建默认 unknown）
+ARG BUILD_COMMIT=unknown
+RUN echo "${BUILD_COMMIT}" > /app/BUILD_COMMIT
+
 # 创建数据目录
 RUN mkdir -p /app/data
 

@@ -805,6 +805,7 @@
             const hintEl = document.getElementById('appVersionHint');
             const actionLink = document.getElementById('appVersionActionLink');
             const upgradeBadgeEl = document.getElementById('appVersionUpgradeBadge');
+            const buildInfoEl = document.getElementById('appVersionBuildInfo');
             const state = String(versionStatus.status || 'unknown').trim() || 'unknown';
             const badgeLabel = String(versionStatus.badge_label || '检查失败').trim() || '检查失败';
             const hint = String(versionStatus.hint || '暂时无法获取仓库版本信息').trim() || '暂时无法获取仓库版本信息';
@@ -819,6 +820,20 @@
 
             if (hintEl) {
                 hintEl.textContent = hint;
+            }
+
+            if (buildInfoEl) {
+                const commit = String(versionStatus.build_commit || '').trim();
+                const upstream = String(versionStatus.upstream_base_version || '').trim();
+                const parts = [];
+                if (commit && commit !== 'unknown') parts.push(`commit: ${commit}`);
+                if (upstream) parts.push(`基于上游 v${upstream}`);
+                if (parts.length > 0) {
+                    buildInfoEl.textContent = parts.join('　');
+                    buildInfoEl.hidden = false;
+                } else {
+                    buildInfoEl.hidden = true;
+                }
             }
 
             if (upgradeBadgeEl) {
