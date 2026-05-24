@@ -982,6 +982,12 @@ def upload_webdav_backup_with_config(base_url: str, username: str, password: str
 @login_required
 def api_upload_webdav_backup():
     data = request.json or {}
+    login_password = str(data.get('login_password') or '')
+    if not login_password:
+        return jsonify({'success': False, 'error': '手动上传备份需要输入登录密码'})
+    if not verify_login_password(login_password):
+        return jsonify({'success': False, 'error': '登录密码错误'})
+
     config = normalize_webdav_backup_config(data.get('config', {}) if isinstance(data.get('config'), dict) else {})
     if not config['url']:
         config = {

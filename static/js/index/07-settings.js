@@ -468,6 +468,7 @@
             if (!btn || btn.disabled) return;
 
             const draft = buildWebdavBackupDraftConfig();
+            const loginPassword = document.getElementById('webdavBackupVerifyPassword')?.value || '';
 
             if (!draft.url) {
                 showToast('请先填写 WebDAV 目录 URL', 'error');
@@ -481,6 +482,10 @@
                 }
             } catch (error) {
                 showToast('WebDAV 目录 URL 无效', 'error');
+                return;
+            }
+            if (!loginPassword) {
+                showToast('手动上传备份需要输入登录密码', 'error');
                 return;
             }
             if (!(await showConfirmModal('确定要立即上传备份到 WebDAV 吗？', { title: '手动上传备份', confirmText: '确认上传', danger: false }))) return;
@@ -500,6 +505,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         config: draft,
+                        login_password: loginPassword
                     })
                 });
                 const data = await response.json();
@@ -1093,6 +1099,7 @@
             const wecomWebhookUrl = document.getElementById('settingsWecomWebhookUrl').value.trim();
             const webdavBackupSettings = getWebdavBackupFormSettings();
             const webdavBackupChanged = hasWebdavBackupSettingsChanged(webdavBackupSettings);
+            const webdavBackupVerifyPassword = document.getElementById('webdavBackupVerifyPassword')?.value || '';
 
             if (Number.isNaN(days) || days < 1 || days > 90) {
                 showToast('刷新周期必须在 1-90 天之间', 'error');
@@ -1147,6 +1154,10 @@
                 return;
             }
             if (webdavBackupChanged) {
+                if (!webdavBackupVerifyPassword) {
+                    showToast('修改 WebDAV 备份设置需要输入登录密码', 'error');
+                    return;
+                }
                 if (!(await showConfirmModal('确定要保存 WebDAV 备份设置变更吗？', { title: '保存 WebDAV 设置', confirmText: '确认保存', danger: false }))) return;
                 if (webdavBackupSettings.webdav_backup_enabled === 'true' && !webdavBackupSettings.webdav_backup_url) {
                     showToast('启用 WebDAV 备份时必须填写 WebDAV 目录 URL', 'error');
@@ -1199,6 +1210,7 @@
 
             if (webdavBackupChanged) {
                 Object.assign(settings, webdavBackupSettings);
+                settings.webdav_backup_verify_password = webdavBackupVerifyPassword;
             }
 
             settings.webdav_pull_enabled = document.getElementById('webdavPullEnabled')?.checked || false;

@@ -328,6 +328,12 @@ def api_update_settings():
 
     webdav_backup_changed = has_webdav_backup_setting_changes(data)
     if webdav_backup_changed:
+        confirm_password = str(data.get('webdav_backup_verify_password', ''))
+        if not confirm_password:
+            return jsonify({'success': False, 'error': '修改 WebDAV 备份设置需要验证登录密码'})
+        if not verify_login_password(confirm_password):
+            return jsonify({'success': False, 'error': 'WebDAV 备份设置验证失败：登录密码错误'})
+
         proposed_backup = {
             key: normalize_webdav_backup_setting_value(key, get_current_webdav_backup_setting_value(key))
             for key in WEBDAV_BACKUP_SETTING_KEYS
